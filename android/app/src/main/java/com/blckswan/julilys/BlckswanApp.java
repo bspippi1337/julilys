@@ -21,15 +21,7 @@ public class BlckswanApp extends Application {
         try {
             File shim = new File(getFilesDir(), "su");
             String script = "#!/system/bin/sh\n"
-                    + "for s in \\\n"
-                    + "  /system/bin/su \\\n"
-                    + "  /system/xbin/su \\\n"
-                    + "  /sbin/su \\\n"
-                    + "  /su/bin/su \\\n"
-                    + "  /debug_ramdisk/su \\\n"
-                    + "  /debug_ramdisk/.magisk/mirror/system/bin/su \\\n"
-                    + "  /data/adb/magisk/su\n"
-                    + "do\n"
+                    + "for s in /system/bin/su /system/xbin/su /sbin/su /su/bin/su /debug_ramdisk/su /debug_ramdisk/.magisk/mirror/system/bin/su /data/adb/magisk/su; do\n"
                     + "  if [ -x \"$s\" ]; then exec \"$s\" \"$@\"; fi\n"
                     + "done\n"
                     + "exit 127\n";
