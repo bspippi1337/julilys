@@ -7,6 +7,7 @@ import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothGatt;
 import android.bluetooth.BluetoothGattCallback;
 import android.bluetooth.BluetoothGattCharacteristic;
+import android.bluetooth.BluetoothGattDescriptor;
 import android.bluetooth.BluetoothGattService;
 import android.bluetooth.BluetoothManager;
 import android.bluetooth.BluetoothProfile;
@@ -32,20 +33,14 @@ import android.widget.LinearLayout;
 import android.widget.SeekBar;
 import android.widget.TextView;
 
-import org.json.JSONArray;
-import org.json.JSONObject;
-
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashMap;
-import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -57,48 +52,47 @@ import javax.crypto.spec.SecretKeySpec;
 
 public class MainActivity extends Activity {
     private static final int REQ_BLE = 42;
-    private static final String PREFS = "blckswan_local_mesh";
+    private static final String PREFS = "blckswan_gatt_mesh";
+    private static final String PREFERRED_GATEWAY = "D0:00:ED:9C:01:5F";
 
     private static final UUID PLEJD_SERVICE = UUID.fromString("31ba0001-6085-4726-be45-040c957391b5");
+    private static final UUID PLEJD_LIGHTLEVEL = UUID.fromString("31ba0003-6085-4726-be45-040c957391b5");
     private static final UUID PLEJD_DATA = UUID.fromString("31ba0004-6085-4726-be45-040c957391b5");
     private static final UUID PLEJD_AUTH = UUID.fromString("31ba0009-6085-4726-be45-040c957391b5");
     private static final UUID PLEJD_PING = UUID.fromString("31ba000a-6085-4726-be45-040c957391b5");
+    private static final UUID CCCD = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
 
-    private final ExecutorService io = Executors.newSingleThreadExecutor();
     private final Handler main = new Handler(Looper.getMainLooper());
+    private final ExecutorService io = Executors.newSingleThreadExecutor();
+    private final LinkedHashSet<Integer> meshTargets = new LinkedHashSet<>();
 
     private EditText keyInput;
-    private EditText targetsInput;
-    private Button importRoot;
-    private Button connect;
+    private Button rootButton;
+    private Button linkButton;
     private TextView status;
+    private TextView nodes;
     private TextView value;
-    private TextView targetCount;
     private SeekBar dimmer;
 
     private BluetoothLeScanner scanner;
     private BluetoothGatt gatt;
+    private BluetoothGattCharacteristic lightLevelChar;
+    private BluetoothGattCharacteristic dataChar;
     private BluetoothGattCharacteristic authChar;
     private BluetoothGattCharacteristic pingChar;
-    private BluetoothGattCharacteristic dataChar;
 
     private byte[] cryptoKey;
     private String gatewayAddress;
-    private final List<Integer> dimTargets = new ArrayList<>();
-
-    private int authStage = 0;
-    private byte lastPing = 0;
-    private boolean meshReady = false;
-    private boolean dataWriteBusy = false;
-    private final ArrayList<byte[]> dataQueue = new ArrayList<>();
-    private Integer pendingPercent = null;
-    private Runnable pendingDimRunnable;
+    private int authStage;
+    private byte lastPing;
+    private boolean meshReady;
+    private Runnable pendingDim;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         buildUi();
-        loadSavedConfig();
+        loadKey();
         requestBlePermissionsIfNeeded();
     }
 
@@ -106,9 +100,9 @@ public class MainActivity extends Activity {
         return Math.round(v * getResources().getDisplayMetrics().density);
     }
 
-    private TextView label(String text, int sp, int color) {
+    private TextView text(String s, int sp, int color) {
         TextView v = new TextView(this);
-        v.setText(text);
+        v.setText(s);
         v.setTextSize(sp);
         v.setTextColor(color);
         return v;
@@ -116,7 +110,7 @@ public class MainActivity extends Activity {
 
     private void buildUi() {
         int green = Color.rgb(112, 255, 156);
-        int text = Color.rgb(240, 247, 242);
+        int fg = Color.rgb(240, 247, 242);
         int muted = Color.rgb(142, 160, 150);
         int panel = Color.rgb(13, 18, 15);
 
@@ -125,109 +119,96 @@ public class MainActivity extends Activity {
         root.setPadding(dp(24), dp(28), dp(24), dp(24));
         root.setBackgroundColor(Color.rgb(5, 7, 6));
 
-        TextView brand = label("BLCKSWAN", 34, green);
+        TextView brand = text("BLCKSWAN", 34, green);
         brand.setTypeface(null, 1);
         root.addView(brand);
 
-        TextView sub = label("JULILYS // P-MESH DIMMER", 13, muted);
+        TextView sub = text("JULILYS // RAW GATT DIMMER", 13, muted);
         sub.setPadding(0, 0, 0, dp(20));
         root.addView(sub);
 
-        status = label("LOCAL MODE // API BYPASSED", 14, green);
+        status = text("BLE ONLY // NO CLOUD // NO API", 14, green);
         status.setPadding(0, 0, 0, dp(14));
         root.addView(status);
 
         keyInput = new EditText(this);
-        keyInput.setHint("P-mesh cryptoKey (32 hex)");
+        keyInput.setHint("cryptoKey // 32 hex");
         keyInput.setHintTextColor(muted);
-        keyInput.setTextColor(text);
+        keyInput.setTextColor(fg);
         keyInput.setSingleLine(true);
         keyInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD);
         keyInput.setBackgroundColor(panel);
         keyInput.setPadding(dp(14), dp(12), dp(14), dp(12));
         root.addView(keyInput, new LinearLayout.LayoutParams(-1, -2));
 
-        targetsInput = new EditText(this);
-        targetsInput.setHint("Dimmable addresses, e.g. 11,12,17");
-        targetsInput.setHintTextColor(muted);
-        targetsInput.setTextColor(text);
-        targetsInput.setSingleLine(true);
-        targetsInput.setInputType(InputType.TYPE_CLASS_TEXT);
-        targetsInput.setBackgroundColor(panel);
-        targetsInput.setPadding(dp(14), dp(12), dp(14), dp(12));
-        LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(-1, -2);
-        tp.topMargin = dp(8);
-        root.addView(targetsInput, tp);
+        rootButton = new Button(this);
+        rootButton.setText("AUTO KEY // ROOT");
+        rootButton.setTextColor(green);
+        rootButton.setBackgroundColor(panel);
+        rootButton.setOnClickListener(v -> importKeyFromPlejd());
+        LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(-1, dp(50));
+        rp.topMargin = dp(10);
+        root.addView(rootButton, rp);
 
-        importRoot = new Button(this);
-        importRoot.setText("AUTO IMPORT // ROOT");
-        importRoot.setTextColor(green);
-        importRoot.setBackgroundColor(panel);
-        importRoot.setOnClickListener(v -> autoImportRoot());
-        LinearLayout.LayoutParams ip = new LinearLayout.LayoutParams(-1, dp(50));
-        ip.topMargin = dp(10);
-        root.addView(importRoot, ip);
+        linkButton = new Button(this);
+        linkButton.setText("LINK RAW GATT");
+        linkButton.setTextColor(Color.BLACK);
+        linkButton.setBackgroundColor(green);
+        linkButton.setOnClickListener(v -> startLink());
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, dp(54));
+        lp.topMargin = dp(8);
+        root.addView(linkButton, lp);
 
-        connect = new Button(this);
-        connect.setText("LINK LOCAL P-MESH");
-        connect.setTextColor(Color.BLACK);
-        connect.setBackgroundColor(green);
-        connect.setOnClickListener(v -> startLocalLink());
-        LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(-1, dp(54));
-        bp.topMargin = dp(8);
-        root.addView(connect, bp);
+        nodes = text("0 mesh outputs discovered", 13, muted);
+        nodes.setGravity(Gravity.CENTER_HORIZONTAL);
+        nodes.setPadding(0, dp(20), 0, 0);
+        root.addView(nodes);
 
         LinearLayout spacer = new LinearLayout(this);
         root.addView(spacer, new LinearLayout.LayoutParams(1, 0, 1));
 
-        value = label("0%", 58, text);
+        value = text("0%", 58, fg);
         value.setGravity(Gravity.CENTER_HORIZONTAL);
         root.addView(value);
-
-        targetCount = label("mesh not linked", 13, muted);
-        targetCount.setGravity(Gravity.CENTER_HORIZONTAL);
-        targetCount.setPadding(0, 0, 0, dp(12));
-        root.addView(targetCount);
 
         dimmer = new SeekBar(this);
         dimmer.setMax(100);
         dimmer.setProgress(0);
         dimmer.setEnabled(false);
         dimmer.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
-                value.setText(progress + "%");
-                if (fromUser && meshReady) scheduleDim(progress);
+            @Override public void onProgressChanged(SeekBar bar, int p, boolean fromUser) {
+                value.setText(p + "%");
+                if (fromUser && meshReady) scheduleDim(p);
             }
-            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
-            @Override public void onStopTrackingTouch(SeekBar seekBar) {
-                if (meshReady) sendDim(seekBar.getProgress());
+            @Override public void onStartTrackingTouch(SeekBar bar) {}
+            @Override public void onStopTrackingTouch(SeekBar bar) {
+                if (meshReady) sendDim(bar.getProgress());
             }
         });
         root.addView(dimmer, new LinearLayout.LayoutParams(-1, dp(64)));
 
-        TextView footer = label("NO CLOUD // NO API // BLE ONLY", 11, muted);
-        footer.setGravity(Gravity.CENTER_HORIZONTAL);
-        footer.setPadding(0, dp(10), 0, 0);
-        root.addView(footer);
+        TextView foot = text("0009 AUTH → 0003 DISCOVERY → 0004 CONTROL", 11, muted);
+        foot.setGravity(Gravity.CENTER_HORIZONTAL);
+        foot.setPadding(0, dp(10), 0, 0);
+        root.addView(foot);
 
         setContentView(root);
     }
 
-    private void loadSavedConfig() {
-        SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE);
-        keyInput.setText(p.getString("key", ""));
-        targetsInput.setText(p.getString("targets", ""));
+    private void loadKey() {
+        keyInput.setText(getSharedPreferences(PREFS, MODE_PRIVATE).getString("key", ""));
     }
 
-    private void saveConfig() {
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                .putString("key", keyInput.getText().toString().trim())
-                .putString("targets", targetsInput.getText().toString().trim())
-                .apply();
+    private void saveKey(String key) {
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString("key", key).apply();
     }
 
     private void setStatus(String s) {
         main.post(() -> status.setText(s));
+    }
+
+    private void updateNodeLabel() {
+        main.post(() -> nodes.setText(meshTargets.size() + " mesh output" + (meshTargets.size() == 1 ? "" : "s") + " discovered"));
     }
 
     private boolean hasBlePermissions() {
@@ -247,335 +228,176 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void startLocalLink() {
+    private void importKeyFromPlejd() {
+        rootButton.setEnabled(false);
+        linkButton.setEnabled(false);
+        setStatus("ROOT // SEARCHING LOCAL PLEJD CACHE…");
+        io.execute(() -> {
+            try {
+                String listing = rootShell("for d in /data/user/0/com.plejd.plejdapp /data/data/com.plejd.plejdapp; do [ -d \"$d\" ] && grep -RIl -m1 -E 'cryptoKey|CryptoKey' \"$d\" 2>/dev/null; done | head -50", 256 * 1024);
+                Pattern p = Pattern.compile("(?i)(?:cryptoKey|CryptoKey)[\\\"'\\s:=]+([0-9a-f-]{32,40})");
+                String found = null;
+                for (String path : listing.split("\\r?\\n")) {
+                    path = path.trim();
+                    if (path.isEmpty()) continue;
+                    String raw = rootShell("head -c 8388608 " + shellQuote(path) + " 2>/dev/null", 8 * 1024 * 1024);
+                    Matcher m = p.matcher(raw.replace("&quot;", "\"").replace("\\\"", "\""));
+                    if (m.find()) {
+                        String k = m.group(1).replace("-", "");
+                        if (k.length() == 32) { found = k; break; }
+                    }
+                }
+                if (found == null) throw new Exception("cryptoKey not found");
+                final String key = found;
+                main.post(() -> {
+                    keyInput.setText(key);
+                    saveKey(key);
+                    rootButton.setEnabled(true);
+                    linkButton.setEnabled(true);
+                    setStatus("KEY FOUND // LINKING GATT…");
+                    startLink();
+                });
+            } catch (Exception e) {
+                main.post(() -> {
+                    rootButton.setEnabled(true);
+                    linkButton.setEnabled(true);
+                });
+                fail("ROOT KEY: " + e.getMessage());
+            }
+        });
+    }
+
+    private void startLink() {
         if (!hasBlePermissions()) {
             requestBlePermissionsIfNeeded();
             setStatus("BLE PERMISSION REQUIRED");
             return;
         }
-
         try {
-            String key = keyInput.getText().toString().replace("-", "").replace(" ", "").trim();
-            cryptoKey = hexToBytes(key);
-            if (cryptoKey.length != 16) throw new Exception("cryptoKey must be 16 bytes / 32 hex");
-
-            List<Integer> targets = parseTargets(targetsInput.getText().toString());
-            if (targets.isEmpty()) throw new Exception("No dimmable addresses");
-            dimTargets.clear();
-            dimTargets.addAll(targets);
-            saveConfig();
-
-            connect.setEnabled(false);
-            importRoot.setEnabled(false);
-            dimmer.setEnabled(false);
+            String k = keyInput.getText().toString().replace("-", "").replace(" ", "").trim();
+            cryptoKey = hexToBytes(k);
+            if (cryptoKey.length != 16) throw new Exception("need 32 hex cryptoKey");
+            saveKey(k);
+            meshTargets.clear();
+            updateNodeLabel();
             meshReady = false;
-            targetCount.setText(dimTargets.size() + " local dimmer" + (dimTargets.size() == 1 ? "" : "s"));
-            startBleScan();
+            dimmer.setEnabled(false);
+            rootButton.setEnabled(false);
+            linkButton.setEnabled(false);
+            connectPreferredOrScan();
         } catch (Exception e) {
-            fail("LOCAL CONFIG: " + e.getMessage());
+            fail("KEY: " + e.getMessage());
         }
     }
 
-    private List<Integer> parseTargets(String raw) {
-        LinkedHashSet<Integer> out = new LinkedHashSet<>();
-        for (String part : raw.split("[,;\\s]+")) {
-            if (part.trim().isEmpty()) continue;
-            try {
-                int n = Integer.decode(part.trim());
-                if (n >= 0 && n <= 255) out.add(n);
-            } catch (Exception ignored) {}
-        }
-        return new ArrayList<>(out);
-    }
-
-    private void autoImportRoot() {
-        importRoot.setEnabled(false);
-        connect.setEnabled(false);
-        setStatus("ROOT IMPORT // SEARCHING PLEJD CACHE…");
-
-        io.execute(() -> {
-            try {
-                ImportData found = new ImportData();
-                String cmd = "for d in /data/user/0/com.plejd.plejdapp /data/data/com.plejd.plejdapp; do "
-                        + "[ -d \\\"$d\\\" ] && grep -RIl -m1 -E 'cryptoKey|CryptoKey|outputAddress|_outputAddresses' \\\"$d\\\" 2>/dev/null; "
-                        + "done | head -40";
-                String listing = rootShell(cmd, 128 * 1024);
-                for (String path : listing.split("\\r?\\n")) {
-                    path = path.trim();
-                    if (path.isEmpty()) continue;
-                    try {
-                        String raw = rootShell("head -c 8388608 " + shellQuote(path) + " 2>/dev/null", 8 * 1024 * 1024);
-                        inspectLocalData(raw, found);
-                        if (found.key != null && !found.targets.isEmpty()) break;
-                    } catch (Exception ignored) {}
-                }
-
-                if (found.key == null) {
-                    throw new Exception("cryptoKey not found in local Plejd data");
-                }
-
-                StringBuilder targets = new StringBuilder();
-                for (int n : found.targets) {
-                    if (targets.length() > 0) targets.append(',');
-                    targets.append(n);
-                }
-
-                final String importedKey = found.key;
-                final String importedTargets = targets.toString();
-                main.post(() -> {
-                    keyInput.setText(importedKey);
-                    if (!importedTargets.isEmpty()) targetsInput.setText(importedTargets);
-                    saveConfig();
-                    importRoot.setEnabled(true);
-                    connect.setEnabled(true);
-                    if (!importedTargets.isEmpty()) {
-                        setStatus("ROOT IMPORT OK // LINKING LOCAL MESH…");
-                        startLocalLink();
-                    } else {
-                        setStatus("KEY IMPORTED // ENTER DIMMER ADDRESSES");
-                    }
-                });
-            } catch (Exception e) {
-                main.post(() -> {
-                    importRoot.setEnabled(true);
-                    connect.setEnabled(true);
-                });
-                fail("ROOT IMPORT: " + e.getMessage());
-            }
-        });
-    }
-
-    private void inspectLocalData(String raw, ImportData out) {
-        if (raw == null || raw.isEmpty()) return;
-        String normalized = raw.replace("&quot;", "\"").replace("\\\"", "\"");
-
-        if (out.key == null) {
-            Pattern p = Pattern.compile("(?i)(?:cryptoKey|CryptoKey)[\\\"'\\s:=]+([0-9a-f-]{32,40})");
-            Matcher m = p.matcher(normalized);
-            if (m.find()) {
-                String k = m.group(1).replace("-", "");
-                if (k.length() == 32) out.key = k;
-            }
-        }
-
-        try {
-            String trimmed = normalized.trim();
-            if (trimmed.startsWith("{")) {
-                scanJson(new JSONObject(trimmed), out, 0);
-            } else if (trimmed.startsWith("[")) {
-                scanJson(new JSONArray(trimmed), out, 0);
-            } else {
-                int first = normalized.indexOf('{');
-                int last = normalized.lastIndexOf('}');
-                if (first >= 0 && last > first) {
-                    String candidate = normalized.substring(first, last + 1);
-                    try { scanJson(new JSONObject(candidate), out, 0); } catch (Exception ignored) {}
-                }
-            }
-        } catch (Exception ignored) {}
-    }
-
-    private void scanJson(Object node, ImportData out, int depth) {
-        if (node == null || depth > 10) return;
-        try {
-            if (node instanceof JSONObject) {
-                JSONObject o = (JSONObject) node;
-
-                Iterator<String> names = o.keys();
-                while (names.hasNext()) {
-                    String name = names.next();
-                    if (out.key == null && name.equalsIgnoreCase("cryptoKey")) {
-                        String k = o.optString(name, "").replace("-", "");
-                        if (k.length() == 32) out.key = k;
-                    }
-                }
-
-                if (o.has("devices") && o.has("outputSettings") && o.has("outputAddress")) {
-                    try { out.targets.addAll(findDimmableTargets(o)); } catch (Exception ignored) {}
-                }
-
-                Iterator<String> it = o.keys();
-                while (it.hasNext()) {
-                    String k = it.next();
-                    Object v = o.opt(k);
-                    if (v instanceof JSONObject || v instanceof JSONArray) {
-                        scanJson(v, out, depth + 1);
-                    } else if (v instanceof String && depth < 4) {
-                        String s = ((String) v).trim();
-                        if (s.startsWith("{") || s.startsWith("[")) {
-                            try {
-                                scanJson(s.startsWith("{") ? new JSONObject(s) : new JSONArray(s), out, depth + 1);
-                            } catch (Exception ignored) {}
-                        }
-                    }
-                }
-            } else if (node instanceof JSONArray) {
-                JSONArray a = (JSONArray) node;
-                for (int i = 0; i < a.length(); i++) scanJson(a.opt(i), out, depth + 1);
-            }
-        } catch (Exception ignored) {}
-    }
-
-    private List<Integer> findDimmableTargets(JSONObject details) throws Exception {
-        Map<String, JSONObject> devicesByObjectId = new HashMap<>();
-        JSONArray devices = details.optJSONArray("devices");
-        if (devices != null) {
-            for (int i = 0; i < devices.length(); i++) {
-                JSONObject d = devices.getJSONObject(i);
-                devicesByObjectId.put(d.optString("objectId"), d);
-            }
-        }
-
-        JSONObject outputAddress = details.optJSONObject("outputAddress");
-        JSONArray outputSettings = details.optJSONArray("outputSettings");
-        LinkedHashSet<Integer> targets = new LinkedHashSet<>();
-        if (outputAddress == null || outputSettings == null) return new ArrayList<>(targets);
-
-        for (int i = 0; i < outputSettings.length(); i++) {
-            JSONObject setting = outputSettings.getJSONObject(i);
-            JSONObject device = devicesByObjectId.get(setting.optString("deviceParseId"));
-            if (device == null) continue;
-            int traits = device.optInt("traits", 0);
-            String outputType = device.optString("outputType", "");
-            boolean dimmable = "LIGHT".equalsIgnoreCase(outputType) || (traits & 0x02) != 0;
-            if (!dimmable) continue;
-
-            String deviceId = setting.optString("deviceId", "");
-            int output = setting.optInt("output", -1);
-            JSONObject outputs = outputAddress.optJSONObject(deviceId);
-            if (outputs == null || output < 0) continue;
-            int address = outputs.optInt(String.valueOf(output), -1);
-            if (address >= 0 && address <= 255) targets.add(address);
-        }
-        return new ArrayList<>(targets);
-    }
-
-    private String rootShell(String command, int maxBytes) throws Exception {
-        Process p = Runtime.getRuntime().exec(new String[]{"su", "-c", command});
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        try (InputStream in = p.getInputStream()) {
-            byte[] buf = new byte[8192];
-            int n;
-            int total = 0;
-            while ((n = in.read(buf)) != -1) {
-                int take = Math.min(n, maxBytes - total);
-                if (take > 0) out.write(buf, 0, take);
-                total += take;
-                if (total >= maxBytes) break;
-            }
-        }
-        int rc = p.waitFor();
-        if (rc != 0 && out.size() == 0) throw new Exception("su denied or Plejd cache unreadable");
-        return out.toString("UTF-8");
-    }
-
-    private static String shellQuote(String s) {
-        return "'" + s.replace("'", "'\\''") + "'";
-    }
-
-    private void startBleScan() {
-        setStatus("SCANNING LOCAL P-MESH…");
-        BluetoothManager manager = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
-        BluetoothAdapter adapter = manager.getAdapter();
+    private void connectPreferredOrScan() {
+        BluetoothManager bm = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
+        BluetoothAdapter adapter = bm.getAdapter();
         if (adapter == null || !adapter.isEnabled()) {
-            fail("BLUETOOTH IS OFF");
+            fail("BLUETOOTH OFF");
             return;
         }
         try {
+            BluetoothDevice preferred = adapter.getRemoteDevice(PREFERRED_GATEWAY);
+            gatewayAddress = preferred.getAddress();
+            setStatus("GATT // CONNECTING " + gatewayAddress);
+            gatt = preferred.connectGatt(this, false, gattCallback, BluetoothDevice.TRANSPORT_LE);
+            main.postDelayed(() -> {
+                if (!meshReady && (gatt == null || authStage == 0)) {
+                    closeGatt();
+                    startScan();
+                }
+            }, 4500);
+        } catch (Exception e) {
+            startScan();
+        }
+    }
+
+    private void startScan() {
+        setStatus("GATT // SCANNING P-MESH…");
+        BluetoothManager bm = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
+        BluetoothAdapter adapter = bm.getAdapter();
+        if (adapter == null || !adapter.isEnabled()) { fail("BLUETOOTH OFF"); return; }
+        try {
             scanner = adapter.getBluetoothLeScanner();
-            if (scanner == null) throw new Exception("BLE scanner unavailable");
-            ScanFilter filter = new ScanFilter.Builder().setServiceUuid(new ParcelUuid(PLEJD_SERVICE)).build();
-            ScanSettings settings = new ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build();
-            scanner.startScan(Arrays.asList(filter), settings, scanCallback);
+            ScanFilter f = new ScanFilter.Builder().setServiceUuid(new ParcelUuid(PLEJD_SERVICE)).build();
+            ScanSettings s = new ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build();
+            scanner.startScan(Arrays.asList(f), s, scanCallback);
             main.postDelayed(() -> {
                 if (!meshReady && gatt == null) {
                     stopScan();
-                    fail("NO LOCAL P-MESH FOUND");
+                    fail("NO P-MESH FOUND");
                 }
-            }, 15000);
+            }, 12000);
         } catch (Exception e) {
             fail("SCAN: " + e.getMessage());
         }
     }
 
     private void stopScan() {
-        try {
-            if (scanner != null) scanner.stopScan(scanCallback);
-        } catch (SecurityException ignored) {}
+        try { if (scanner != null) scanner.stopScan(scanCallback); } catch (Exception ignored) {}
+        scanner = null;
     }
 
     private final ScanCallback scanCallback = new ScanCallback() {
         @Override public void onScanResult(int callbackType, ScanResult result) {
             if (gatt != null) return;
             stopScan();
-            BluetoothDevice device = result.getDevice();
-            gatewayAddress = device.getAddress();
-            setStatus("CONNECTING " + gatewayAddress + "…");
             try {
-                gatt = device.connectGatt(MainActivity.this, false, gattCallback, BluetoothDevice.TRANSPORT_LE);
-            } catch (SecurityException e) {
-                fail("CONNECT: " + e.getMessage());
-            }
+                BluetoothDevice d = result.getDevice();
+                gatewayAddress = d.getAddress();
+                setStatus("GATT // CONNECTING " + gatewayAddress);
+                gatt = d.connectGatt(MainActivity.this, false, gattCallback, BluetoothDevice.TRANSPORT_LE);
+            } catch (Exception e) { fail("CONNECT: " + e.getMessage()); }
         }
-
-        @Override public void onScanFailed(int errorCode) {
-            fail("SCAN FAILED: " + errorCode);
-        }
+        @Override public void onScanFailed(int errorCode) { fail("SCAN FAILED " + errorCode); }
     };
 
     private final BluetoothGattCallback gattCallback = new BluetoothGattCallback() {
         @Override public void onConnectionStateChange(BluetoothGatt g, int statusCode, int newState) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
-                setStatus("DISCOVERING P-MESH…");
-                try { g.discoverServices(); } catch (SecurityException e) { fail("GATT: " + e.getMessage()); }
+                setStatus("GATT // DISCOVERING SERVICES…");
+                try { g.discoverServices(); } catch (Exception e) { fail("DISCOVERY: " + e.getMessage()); }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 meshReady = false;
                 main.post(() -> dimmer.setEnabled(false));
-                setStatus("P-MESH DISCONNECTED");
-                try { g.close(); } catch (Exception ignored) {}
                 if (gatt == g) gatt = null;
+                try { g.close(); } catch (Exception ignored) {}
+                setStatus("GATT // DISCONNECTED");
             }
         }
 
         @Override public void onServicesDiscovered(BluetoothGatt g, int statusCode) {
-            if (statusCode != BluetoothGatt.GATT_SUCCESS) {
-                fail("SERVICE DISCOVERY FAILED");
-                return;
-            }
+            if (statusCode != BluetoothGatt.GATT_SUCCESS) { fail("SERVICE DISCOVERY FAILED"); return; }
             BluetoothGattService svc = g.getService(PLEJD_SERVICE);
-            if (svc == null) {
-                fail("PLEJD SERVICE MISSING");
-                return;
-            }
+            if (svc == null) { fail("PLEJD SERVICE MISSING"); return; }
+            lightLevelChar = svc.getCharacteristic(PLEJD_LIGHTLEVEL);
+            dataChar = svc.getCharacteristic(PLEJD_DATA);
             authChar = svc.getCharacteristic(PLEJD_AUTH);
             pingChar = svc.getCharacteristic(PLEJD_PING);
-            dataChar = svc.getCharacteristic(PLEJD_DATA);
-            if (authChar == null || pingChar == null || dataChar == null) {
-                fail("PLEJD CHARACTERISTICS MISSING");
-                return;
+            if (lightLevelChar == null || dataChar == null || authChar == null || pingChar == null) {
+                fail("PLEJD GATT CHARACTERISTIC MISSING"); return;
             }
-            authStage = 1;
-            setStatus("AUTHENTICATING LOCAL P-MESH…");
-            writeGatt(authChar, new byte[]{0x00});
+            try {
+                g.setCharacteristicNotification(lightLevelChar, true);
+                BluetoothGattDescriptor cccd = lightLevelChar.getDescriptor(CCCD);
+                if (cccd != null) {
+                    cccd.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
+                    if (!g.writeDescriptor(cccd)) beginAuth();
+                } else beginAuth();
+            } catch (Exception e) { fail("NOTIFY: " + e.getMessage()); }
         }
 
-        @Override public void onCharacteristicWrite(BluetoothGatt g, BluetoothGattCharacteristic characteristic, int statusCode) {
-            if (statusCode != BluetoothGatt.GATT_SUCCESS) {
-                if (characteristic.getUuid().equals(PLEJD_DATA)) {
-                    dataWriteBusy = false;
-                    dataQueue.clear();
-                    fail("DIM WRITE FAILED");
-                } else {
-                    fail("GATT WRITE FAILED");
-                }
-                return;
-            }
-            UUID id = characteristic.getUuid();
+        @Override public void onDescriptorWrite(BluetoothGatt g, BluetoothGattDescriptor descriptor, int statusCode) {
+            if (descriptor.getCharacteristic().getUuid().equals(PLEJD_LIGHTLEVEL)) beginAuth();
+        }
+
+        @Override public void onCharacteristicWrite(BluetoothGatt g, BluetoothGattCharacteristic c, int statusCode) {
+            if (statusCode != BluetoothGatt.GATT_SUCCESS) { fail("GATT WRITE FAILED " + statusCode); return; }
+            UUID id = c.getUuid();
             if (id.equals(PLEJD_AUTH)) {
-                if (authStage == 1) {
-                    authStage = 2;
-                    readGatt(authChar);
-                } else if (authStage == 3) {
+                if (authStage == 1) { authStage = 2; readGatt(authChar); }
+                else if (authStage == 3) {
                     authStage = 4;
                     lastPing = (byte) (System.nanoTime() & 0xff);
                     writeGatt(pingChar, new byte[]{lastPing});
@@ -583,107 +405,111 @@ public class MainActivity extends Activity {
             } else if (id.equals(PLEJD_PING) && authStage == 4) {
                 authStage = 5;
                 readGatt(pingChar);
-            } else if (id.equals(PLEJD_DATA)) {
-                writeNextData();
             }
         }
 
-        @Override public void onCharacteristicRead(BluetoothGatt g, BluetoothGattCharacteristic characteristic, int statusCode) {
-            if (statusCode != BluetoothGatt.GATT_SUCCESS) {
-                fail("GATT READ FAILED");
-                return;
-            }
-            UUID id = characteristic.getUuid();
-            byte[] bytes = characteristic.getValue();
-            if (id.equals(PLEJD_AUTH) && authStage == 2) {
+        @Override public void onCharacteristicRead(BluetoothGatt g, BluetoothGattCharacteristic c, int statusCode) {
+            if (statusCode != BluetoothGatt.GATT_SUCCESS) { fail("GATT READ FAILED " + statusCode); return; }
+            byte[] b = c.getValue();
+            if (c.getUuid().equals(PLEJD_AUTH) && authStage == 2) {
                 try {
-                    byte[] response = authResponse(cryptoKey, bytes);
                     authStage = 3;
-                    writeGatt(authChar, response);
-                } catch (Exception e) {
-                    fail("AUTH CRYPTO: " + e.getMessage());
-                }
-            } else if (id.equals(PLEJD_PING) && authStage == 5) {
+                    writeGatt(authChar, authResponse(cryptoKey, b));
+                } catch (Exception e) { fail("AUTH CRYPTO: " + e.getMessage()); }
+            } else if (c.getUuid().equals(PLEJD_PING) && authStage == 5) {
                 int expected = ((lastPing & 0xff) + 1) & 0xff;
-                if (bytes != null && bytes.length > 0 && (bytes[0] & 0xff) == expected) {
+                if (b != null && b.length > 0 && (b[0] & 0xff) == expected) {
                     authStage = 6;
-                    meshReady = true;
-                    setStatus("LOCAL P-MESH ONLINE // " + dimTargets.size() + " DIMMERS");
-                    main.post(() -> {
-                        dimmer.setEnabled(true);
-                        connect.setEnabled(true);
-                        importRoot.setEnabled(true);
-                    });
-                } else {
-                    fail("P-MESH AUTH FAILED");
-                }
+                    setStatus("GATT AUTH OK // POLLING MESH…");
+                    pollMesh();
+                } else fail("P-MESH AUTH FAILED");
             }
+        }
+
+        @Override public void onCharacteristicChanged(BluetoothGatt g, BluetoothGattCharacteristic c) {
+            if (c.getUuid().equals(PLEJD_LIGHTLEVEL)) parseLightLevels(c.getValue());
         }
     };
 
-    private void writeGatt(BluetoothGattCharacteristic c, byte[] data) {
+    private void beginAuth() {
+        authStage = 1;
+        setStatus("0009 // AUTHENTICATING…");
+        writeGatt(authChar, new byte[]{0x00});
+    }
+
+    private void pollMesh() {
+        try {
+            lightLevelChar.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE);
+            lightLevelChar.setValue(new byte[]{0x01});
+            if (!gatt.writeCharacteristic(lightLevelChar)) { fail("0003 POLL REJECTED"); return; }
+            main.postDelayed(() -> {
+                if (meshTargets.isEmpty()) {
+                    try { gatt.readCharacteristic(lightLevelChar); } catch (Exception ignored) {}
+                }
+            }, 700);
+        } catch (Exception e) { fail("0003 POLL: " + e.getMessage()); }
+    }
+
+    private void parseLightLevels(byte[] data) {
+        if (data == null || data.length < 10) return;
+        for (int i = 0; i + 9 < data.length; i += 10) {
+            int address = data[i] & 0xff;
+            if (address > 0) meshTargets.add(address);
+        }
+        updateNodeLabel();
+        if (!meshTargets.isEmpty()) {
+            meshReady = true;
+            setStatus("P-MESH ONLINE // RAW GATT");
+            main.post(() -> {
+                dimmer.setEnabled(true);
+                rootButton.setEnabled(true);
+                linkButton.setEnabled(true);
+            });
+        }
+    }
+
+    private void scheduleDim(int p) {
+        if (pendingDim != null) main.removeCallbacks(pendingDim);
+        pendingDim = () -> sendDim(p);
+        main.postDelayed(pendingDim, 100);
+    }
+
+    private void sendDim(int percent) {
+        if (!meshReady || dataChar == null || cryptoKey == null || gatewayAddress == null) return;
+        percent = Math.max(0, Math.min(100, percent));
+        int level = Math.max(1, Math.round(percent * 255f / 100f));
+        List<Integer> targets = new ArrayList<>(meshTargets);
+        for (int i = 0; i < targets.size(); i++) {
+            final int address = targets.get(i);
+            final int p = percent;
+            final int l = level;
+            main.postDelayed(() -> sendOne(address, p, l), i * 28L);
+        }
+    }
+
+    private void sendOne(int address, int percent, int level) {
+        try {
+            byte[] plain = percent == 0
+                    ? new byte[]{(byte) address, 0x01, 0x10, 0x00, (byte) 0x97, 0x00}
+                    : new byte[]{(byte) address, 0x01, 0x10, 0x00, (byte) 0x98, 0x01, (byte) level, (byte) level};
+            byte[] encrypted = crypt(cryptoKey, gatewayAddress, plain);
+            dataChar.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE);
+            dataChar.setValue(encrypted);
+            gatt.writeCharacteristic(dataChar);
+        } catch (Exception e) { setStatus("0004 WRITE: " + e.getMessage()); }
+    }
+
+    private void writeGatt(BluetoothGattCharacteristic c, byte[] value) {
         try {
             c.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
-            c.setValue(data);
+            c.setValue(value);
             if (!gatt.writeCharacteristic(c)) fail("GATT WRITE REJECTED");
-        } catch (SecurityException e) {
-            fail("BLE PERMISSION LOST");
-        }
+        } catch (Exception e) { fail("GATT WRITE: " + e.getMessage()); }
     }
 
     private void readGatt(BluetoothGattCharacteristic c) {
-        try {
-            if (!gatt.readCharacteristic(c)) fail("GATT READ REJECTED");
-        } catch (SecurityException e) {
-            fail("BLE PERMISSION LOST");
-        }
-    }
-
-    private void scheduleDim(int percent) {
-        if (pendingDimRunnable != null) main.removeCallbacks(pendingDimRunnable);
-        pendingDimRunnable = () -> sendDim(percent);
-        main.postDelayed(pendingDimRunnable, 90);
-    }
-
-    private synchronized void sendDim(int percent) {
-        if (!meshReady || dataChar == null || cryptoKey == null || gatewayAddress == null) return;
-        percent = Math.max(0, Math.min(100, percent));
-        if (dataWriteBusy) {
-            pendingPercent = percent;
-            return;
-        }
-        try {
-            dataQueue.clear();
-            int level = Math.max(1, Math.round(percent * 255f / 100f));
-            for (int address : dimTargets) {
-                byte[] plain;
-                if (percent == 0) {
-                    plain = new byte[]{(byte) address, 0x01, 0x10, 0x00, (byte) 0x97, 0x00};
-                } else {
-                    plain = new byte[]{(byte) address, 0x01, 0x10, 0x00, (byte) 0x98, 0x01, (byte) level, (byte) level};
-                }
-                dataQueue.add(crypt(cryptoKey, gatewayAddress, plain));
-            }
-            dataWriteBusy = true;
-            pendingPercent = null;
-            writeNextData();
-        } catch (Exception e) {
-            fail("DIM CRYPTO: " + e.getMessage());
-        }
-    }
-
-    private synchronized void writeNextData() {
-        if (!dataQueue.isEmpty()) {
-            byte[] next = dataQueue.remove(0);
-            writeGatt(dataChar, next);
-            return;
-        }
-        dataWriteBusy = false;
-        if (pendingPercent != null) {
-            int p = pendingPercent;
-            pendingPercent = null;
-            main.post(() -> sendDim(p));
-        }
+        try { if (!gatt.readCharacteristic(c)) fail("GATT READ REJECTED"); }
+        catch (Exception e) { fail("GATT READ: " + e.getMessage()); }
     }
 
     private static byte[] crypt(byte[] key, String address, byte[] input) throws Exception {
@@ -693,7 +519,6 @@ public class MainActivity extends Activity {
         System.arraycopy(addr, 0, block, 0, 6);
         System.arraycopy(addr, 0, block, 6, 6);
         System.arraycopy(addr, 0, block, 12, 4);
-
         Cipher cipher = Cipher.getInstance("AES/ECB/NoPadding");
         cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(key, "AES"));
         byte[] stream = cipher.doFinal(block);
@@ -703,22 +528,22 @@ public class MainActivity extends Activity {
     }
 
     private static byte[] authResponse(byte[] key, byte[] challenge) throws Exception {
-        if (key.length != 16 || challenge == null || challenge.length != 16) throw new Exception("Expected 16-byte key/challenge");
+        if (key == null || key.length != 16 || challenge == null || challenge.length != 16) throw new Exception("bad key/challenge length");
         byte[] x = new byte[16];
         for (int i = 0; i < 16; i++) x[i] = (byte) (key[i] ^ challenge[i]);
-        byte[] digest = MessageDigest.getInstance("SHA-256").digest(x);
-        byte[] response = new byte[16];
-        for (int i = 0; i < 16; i++) response[i] = (byte) (digest[i] ^ digest[i + 16]);
-        return response;
+        byte[] d = MessageDigest.getInstance("SHA-256").digest(x);
+        byte[] out = new byte[16];
+        for (int i = 0; i < 16; i++) out[i] = (byte) (d[i] ^ d[i + 16]);
+        return out;
     }
 
     private static byte[] hexToBytes(String hex) {
-        if ((hex.length() & 1) != 0) throw new IllegalArgumentException("Odd-length hex");
+        if ((hex.length() & 1) != 0) throw new IllegalArgumentException("odd hex length");
         byte[] out = new byte[hex.length() / 2];
         for (int i = 0; i < out.length; i++) {
             int hi = Character.digit(hex.charAt(i * 2), 16);
             int lo = Character.digit(hex.charAt(i * 2 + 1), 16);
-            if (hi < 0 || lo < 0) throw new IllegalArgumentException("Invalid hex");
+            if (hi < 0 || lo < 0) throw new IllegalArgumentException("invalid hex");
             out[i] = (byte) ((hi << 4) | lo);
         }
         return out;
@@ -730,31 +555,54 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void fail(String message) {
+    private String rootShell(String command, int limit) throws Exception {
+        Process p = new ProcessBuilder("su", "-c", command).redirectErrorStream(true).start();
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        try (InputStream in = p.getInputStream()) {
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) >= 0) {
+                int room = limit - out.size();
+                if (room <= 0) break;
+                out.write(buf, 0, Math.min(n, room));
+            }
+        }
+        int rc = p.waitFor();
+        String s = out.toString("UTF-8");
+        if (rc != 0 && s.trim().isEmpty()) throw new Exception("su failed rc=" + rc);
+        return s;
+    }
+
+    private static String shellQuote(String s) {
+        return "'" + s.replace("'", "'\\''") + "'";
+    }
+
+    private void fail(String msg) {
         meshReady = false;
-        setStatus(message == null ? "ERROR" : message.toUpperCase(Locale.ROOT));
+        setStatus((msg == null ? "ERROR" : msg).toUpperCase(Locale.ROOT));
         main.post(() -> {
-            connect.setEnabled(true);
-            importRoot.setEnabled(true);
             dimmer.setEnabled(false);
+            rootButton.setEnabled(true);
+            linkButton.setEnabled(true);
         });
     }
 
-    @Override
-    protected void onDestroy() {
-        super.onDestroy();
-        stopScan();
+    private void closeGatt() {
         try {
             if (gatt != null) {
                 gatt.disconnect();
                 gatt.close();
             }
         } catch (Exception ignored) {}
-        io.shutdownNow();
+        gatt = null;
+        authStage = 0;
     }
 
-    private static class ImportData {
-        String key;
-        final LinkedHashSet<Integer> targets = new LinkedHashSet<>();
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        stopScan();
+        closeGatt();
+        io.shutdownNow();
     }
 }
