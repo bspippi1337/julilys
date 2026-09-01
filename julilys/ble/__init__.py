@@ -19,7 +19,7 @@ from .ble_characteristics import PLEJD_SERVICE
 from .debug import rec_log
 
 _LOGGER = logging.getLogger(__name__)
-_CONNECTION_LOG = logging.getLogger("pyplejd.ble.connection")
+_CONNECTION_LOG = logging.getLogger("julilys.ble.connection")
 
 
 class MeshDevice:

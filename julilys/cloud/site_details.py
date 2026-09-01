@@ -5,7 +5,7 @@ from .. import const
 
 
 # Parameters are read from my own test site data. There may be more or fewer parameters in some objects
-# Most things not currently used by pyplejd in any way is currently commented out.
+# Most things not currently used by julilys in any way is currently commented out.
 
 
 class PlejdObject(BaseModel):  # TODO

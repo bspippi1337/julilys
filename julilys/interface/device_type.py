@@ -1,4 +1,4 @@
-"""All device types handled by pyplejd"""
+"""All device types handled by julilys"""
 
 from .plejd_device import (
     PlejdDevice,

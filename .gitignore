@@ -1,0 +1,10 @@
+/*
+/*/
+!gitignore
+!README.md
+!LICENSE
+!setup.py
+!setup.cfg
+!julilys/
+**/__pycache__/
+!compiling.md

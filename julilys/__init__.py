@@ -96,7 +96,7 @@ class PlejdManager:
 
         self.mesh.set_key(self.cloud.cryptokey)
 
-        LOGGER = logging.getLogger("pyplejd.device_list")
+        LOGGER = logging.getLogger("julilys.device_list")
 
         LOGGER.debug("Output Devices:")
         for device in self.cloud.outputs:
