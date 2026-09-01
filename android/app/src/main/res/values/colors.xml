@@ -1,0 +1,8 @@
+<resources>
+    <color name="blckswan_black">#050706</color>
+    <color name="blckswan_panel">#0D120F</color>
+    <color name="blckswan_green">#70FF9C</color>
+    <color name="blckswan_green_dim">#2D7547</color>
+    <color name="blckswan_text">#F0F7F2</color>
+    <color name="blckswan_muted">#8EA096</color>
+</resources>
