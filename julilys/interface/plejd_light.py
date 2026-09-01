@@ -59,6 +59,23 @@ class PlejdLight(PlejdOutput):
         for listener in self._listeners:
             listener(self._state)
 
+    async def set_dim(self, percent: float):
+        """Set brightness using a simple 0-100 percent value.
+
+        0 turns the light off. Values above 0 turn it on at the requested
+        brightness. The Plejd mesh itself uses an 8-bit level (1-255).
+        """
+        if not self.dimmable:
+            raise ValueError(f"{self.name} is not dimmable")
+
+        percent = max(0.0, min(100.0, float(percent)))
+        if percent == 0:
+            await self.turn_off()
+            return
+
+        level = max(1, round(percent * 255 / 100))
+        await self.turn_on(dim=level)
+
     async def turn_on(self, dim=None, colortemp=None):
         if not self._mesh:
             return
